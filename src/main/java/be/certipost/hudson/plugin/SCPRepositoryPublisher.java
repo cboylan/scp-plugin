@@ -32,6 +32,8 @@ import java.io.OutputStream;
 import java.io.OutputStreamWriter;
 import java.io.StringWriter;
 import java.io.PrintStream;
+import java.lang.Runnable;
+import java.lang.Thread;
 import java.util.Iterator;
 import java.util.List;
 import java.util.Map;
@@ -185,22 +187,20 @@ public final class SCPRepositoryPublisher extends Notifier {
 				folderPath = folderPath.trim();
 
 				if (e.copyConsoleLog) {
-					AnnotatedLargeText logText;
-					final StringWriter strWriter;
 					final OutputStream out;
 					final BufferedWriter writer;
-					strWriter = new StringWriter();
-					out = scpsite.createOutStream(folderPath, "console.html", logger, channel);
-					writer = new BufferedWriter(new OutputStreamWriter(out));
+					final Thread consoleWriterThread;
+					final Session consoleSession;
+					final ChannelSftp consoleChannel;
+					consoleSession = scpsite.createSession(null);
+					consoleChannel = scpsite.createChannel(null, consoleSession);
 
-					strWriter.write("<pre>\n");
-					logText = build.getLogText();
-					logText.writeHtmlTo(0, strWriter);
-					writer.write(strWriter.toString());
-					writer.write(build.getResult().toString());
-					writer.write("</pre>\n");
-					writer.flush();
-					writer.close();
+					out = scpsite.createOutStream(folderPath, "console.html", logger, consoleChannel);
+					writer = new BufferedWriter(new OutputStreamWriter(out));
+					log(logger, "Copying console log.");
+					consoleWriterThread = new Thread(new consoleRunnable(build, writer));
+					consoleWriterThread.start();
+
 					continue;
 				}
 				if (src.length == 0) {
@@ -377,5 +377,49 @@ public final class SCPRepositoryPublisher extends Notifier {
 	protected void log(final PrintStream logger, final String message) {
 		logger.println(StringUtils.defaultString(DESCRIPTOR.getShortName())
 				+ message);
+	}
+
+	private class consoleRunnable implements Runnable {
+		private final AbstractBuild build;
+		private final BufferedWriter writer;
+
+		consoleRunnable(AbstractBuild build, BufferedWriter writer) {
+			this.build = build;
+			this.writer = writer;
+		}
+
+		public void run () {
+			AnnotatedLargeText logText;
+			final StringWriter strWriter;
+			strWriter = new StringWriter();
+			long pos = 0;
+
+			try {
+				strWriter.write("<pre>\n");
+				do {
+					logText = build.getLogText();
+					// Use strWriter as temp storage because
+					// writeHTMLTo closes the stream.
+					pos = logText.writeHtmlTo(pos, strWriter);
+					writer.write(strWriter.toString());
+					strWriter.getBuffer().setLength(0);
+					if(!logText.isComplete()) {
+						// Yield to other threads while we wait
+						// for more data.
+						try {
+							Thread.sleep(500);
+						} catch (InterruptedException e) {
+							// Ignore and try reading again.
+						}
+					}
+				} while(!logText.isComplete());
+				writer.write("</pre>\n");
+
+				writer.flush();
+				writer.close();
+			} catch (IOException e) {
+				//Ignore the error not much we can do about it.
+			}
+		}
 	}
 }

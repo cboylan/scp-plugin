@@ -151,6 +151,7 @@ public final class SCPRepositoryPublisher extends Notifier {
 		PrintStream logger = listener.getLogger();
 		Session session = null;
 		ChannelSftp channel = null;
+		boolean delaySessionClose = false;
 		try {
 			scpsite = getSite();
 			if (scpsite == null) {
@@ -192,13 +193,26 @@ public final class SCPRepositoryPublisher extends Notifier {
 					final Thread consoleWriterThread;
 					final Session consoleSession;
 					final ChannelSftp consoleChannel;
-					consoleSession = scpsite.createSession(null);
-					consoleChannel = scpsite.createChannel(null, consoleSession);
+					if (entries.size() > 1) {
+						// If we are copying more than the console log
+						// we need a separate connection for the console
+						// log due to threading/lock issues.
+						consoleSession = scpsite.createSession(null);
+						consoleChannel = scpsite.createChannel(null, consoleSession);
+					}
+					else {
+						// Otherwise use the existing connection.
+						consoleSession = session;
+						consoleChannel = channel;
+						delaySessionClose = true;
+					}
 
-					out = scpsite.createOutStream(folderPath, "console.html", logger, consoleChannel);
+					out = scpsite.createOutStream(folderPath,
+						"console.html", logger, consoleChannel);
 					writer = new BufferedWriter(new OutputStreamWriter(out));
+					consoleWriterThread = new Thread(new consoleRunnable(
+						build, scpsite, consoleSession, consoleChannel, writer));
 					log(logger, "Copying console log.");
-					consoleWriterThread = new Thread(new consoleRunnable(build, writer));
 					consoleWriterThread.start();
 
 					continue;
@@ -256,7 +270,7 @@ public final class SCPRepositoryPublisher extends Notifier {
 			e.printStackTrace(listener.error("Failed to upload files"));
 			build.setResult(Result.UNSTABLE);
 		} finally {
-			if (scpsite != null) {
+			if (scpsite != null && !delaySessionClose) {
 				scpsite.closeSession(logger, session, channel);
 			}
 
@@ -381,10 +395,17 @@ public final class SCPRepositoryPublisher extends Notifier {
 
 	private class consoleRunnable implements Runnable {
 		private final AbstractBuild build;
+		private final SCPSite scpsite;
+		private final Session session;
+		private final ChannelSftp channel;
 		private final BufferedWriter writer;
 
-		consoleRunnable(AbstractBuild build, BufferedWriter writer) {
+		consoleRunnable(AbstractBuild build, SCPSite scpsite, Session session,
+				ChannelSftp channel, BufferedWriter writer) {
 			this.build = build;
+			this.scpsite = scpsite;
+			this.session = session;
+			this.channel = channel;
 			this.writer = writer;
 		}
 
@@ -419,6 +440,8 @@ public final class SCPRepositoryPublisher extends Notifier {
 				writer.close();
 			} catch (IOException e) {
 				//Ignore the error not much we can do about it.
+			} finally {
+				scpsite.closeSession(null, session, channel);
 			}
 		}
 	}
